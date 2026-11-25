@@ -6,6 +6,7 @@
  * GitHub Actions runs once, when you finish. Your repo name and token live only in this phone's storage.
  */
 "use strict";
+const APP_VERSION = "Nov 25 · coming-up";
 
 // ------------------------------------------------------------ storage
 const LS = {
@@ -447,6 +448,7 @@ function viewSettings() {
         <button class="btn ghost grow" data-act="clear">Clear phone copy</button>
       </div>
       <p class="small muted">"Clear phone copy" drops unsynced changes and cached photos, then reloads from GitHub.</p>
+      <p class="small muted">App version: ${esc(APP_VERSION)}</p>
     </div>
   </div>`;
 }
