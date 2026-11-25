@@ -79,6 +79,9 @@ async function loadData() {
   const r = await gh(`contents/app/data.json?${ref()}`, { raw: true });
   data = await r.json();
   LS.set("data", data);
+  const paths = new Set((data.workouts || []).map((w) => w.path));
+  LS.set("extraW", LS.get("extraW", []).filter((w) => !paths.has(w.path)));
+  LS.set("movedAway", LS.get("movedAway", []).filter((p) => paths.has(p)));
   LS.set("dataAt", Date.now());
 }
 
@@ -112,7 +115,16 @@ function prefetch(w) {
 
 // ------------------------------------------------------------ workout state (one per workout file)
 const wk = (path) => "w:" + path;
-const findW = (path) => (data?.workouts || []).find((w) => w.path === path);
+// Workouts = data.json's list, plus ones moved to today on this phone that data.json doesn't show yet,
+// minus the old copies those moves left behind (the script deletes them on its next run).
+function allWorkouts() {
+  const away = LS.get("movedAway", []);
+  const extra = LS.get("extraW", []);
+  const have = new Set((data?.workouts || []).map((w) => w.path));
+  return [...(data?.workouts || []).filter((w) => !away.includes(w.path)), ...extra.filter((w) => !have.has(w.path))]
+    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+}
+const findW = (path) => allWorkouts().find((w) => w.path === path);
 
 function freshState(w) {
   const planned = w.status === "planned";
@@ -240,6 +252,49 @@ document.addEventListener("visibilitychange", () => {
   else refresh(false);
 });
 
+// ------------------------------------------------------------ "Do it today": move a future workout to today
+// 1. Copy its file to today's date ([skip ci]); the script never rewrites today's file, so the copy is safe.
+// 2. Record the move in plan/program.json "moves" (this commit runs the script, which then deletes the old
+//    future file and counts the session on its new day). Same weights: it's the same workout, done early.
+async function doToday(path, btn) {
+  const w = findW(path); const t = todayISO();
+  if (!w || w.date <= t) return;
+  if (!navigator.onLine) { toast("Moving a workout needs signal. Try again in a minute."); return; }
+  const file = w.path.split("/").pop().slice(10);          // "-lower.md"
+  const newPath = `logs/workouts/${t.slice(0, 7)}/${t}${file}`;
+  if (allWorkouts().some((x) => x.path === newPath)) { toast(`Today already has a ${w.title} workout.`); return; }
+  const others = allWorkouts().filter((x) => x.date === t);
+  const monday = (iso) => { const d = new Date(iso + "T12:00:00"); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return d.toISOString().slice(0, 10); };
+  const otherWeek = monday(w.date) !== monday(t);
+  if (!confirm(`Do ${w.title} today instead of ${w.label}?`
+    + (otherWeek ? ` It will count toward this week, so next week plans 2 lifts unless you add one.` : "")
+    + (others.length ? ` Today already has ${others.map((x) => x.title).join(", ")}, so you'll have two.` : ""))) return;
+  const src = w.src || w.date;
+  const moved = `Moved from ${label(src)} (done early)`;
+  btn.disabled = true; toast("Moving…", 8000);
+  try {
+    const { text } = await getFile(w.path);
+    let body = text.replace(/^# .*$/m, `# ${label(t)}, ${t.slice(0, 4)} · ${w.title}`);
+    body = /^_Moved from .*_$/m.test(body) ? body.replace(/^_Moved from .*_$/m, `_${moved}_`) : body.replace(/^(# .*\n\n)/, `$1_${moved}_\n\n`);
+    try { await putFile(newPath, body, undefined, `chore(data): copy ${w.title} ${w.label} to ${label(t)} [skip ci]`); }
+    catch (e) { if (e.status !== 422) throw e; }             // already copied on an earlier try: finish the move
+    await editFile("plan/program.json", (txt) => {
+      const p = JSON.parse(txt);
+      p.moves = p.moves || {};
+      p.moves[src] = { to: t, why: "done early" };
+      return JSON.stringify(p, null, 2) + "\n";
+    }, `chore(data): move ${w.title} from ${label(src)} to ${label(t)}`);
+    LS.set("extraW", [...LS.get("extraW", []).filter((x) => x.path !== newPath),
+      { ...w, date: t, label: label(t), path: newPath, moved, src, status: "planned" }]);
+    LS.set("movedAway", [...new Set([...LS.get("movedAway", []), w.path])]);
+    view = { name: "workout", path: newPath }; render(); window.scrollTo(0, 0);
+    toast(`${w.title} is today's workout now.`);
+  } catch (e) {
+    btn.disabled = false;
+    toast("Couldn't move it. Check signal and try again.", 4000);
+  }
+}
+
 // ------------------------------------------------------------ views
 function header(title, back) {
   return `<header class="top">
@@ -279,7 +334,7 @@ function spark(series) {
 function statusOf(w) { return LS.get(wk(w.path), null)?.status || w.status; }
 function openWorkouts() {
   const t = todayISO();
-  return (data?.workouts || []).filter((w) => w.date < t && statusOf(w) === "planned");
+  return allWorkouts().filter((w) => w.date < t && statusOf(w) === "planned");
 }
 
 function viewHome() {
@@ -289,17 +344,17 @@ function viewHome() {
   const todayW = series.find((r) => r.date === t);
   const a = avg7(series, t);
   const prev = avg7(series, new Date(new Date(t + "T12:00:00") - 7 * 864e5).toISOString().slice(0, 10));
-  const w = (data.workouts || []).find((x) => x.date === t);
-  const next = (data.workouts || []).find((x) => x.date > t);
+  const todays = allWorkouts().filter((x) => x.date === t);
+  const next = allWorkouts().find((x) => x.date > t);
   const open = openWorkouts();
-  const st = w ? statusOf(w) : null;
-  const finished = st && st !== "planned";
-  const late = w && !finished && hourET() >= 18;
-  const lifts = (data.week || []).filter((x) => { const ww = (data.workouts || []).find((y) => y.date === x.date); return ["done", "short"].includes(ww ? statusOf(ww) : x.status); }).length;
+  const lateW = todays.find((x) => statusOf(x) === "planned");
+  const late = lateW && hourET() >= 18;
+  const lifts = (data.week || []).filter((x) => { const ww = allWorkouts().find((y) => y.date === x.date); return ["done", "short"].includes(ww ? statusOf(ww) : x.status); }).length
+    + LS.get("extraW", []).filter((x) => ["done", "short"].includes(statusOf(x))).length;
 
   return `${header(label(t))}
   <div class="wrap">
-    ${late ? `<div class="banner"><b>Today's ${esc(w.title)} isn't finished.</b> Did you go? Tap the toggle below to log it as done, short or skipped.</div>` : ""}
+    ${late ? `<div class="banner"><b>Today's ${esc(lateW?.title)} isn't finished.</b> Did you go? Tap the toggle below to log it as done, short or skipped.</div>` : ""}
     ${open.map((o) => `<div class="banner"><b>${esc(o.label)} ${esc(o.title)} is still open.</b> <a href="#" data-open="${esc(o.path)}">Log it</a> or mark it skipped.</div>`).join("")}
 
     <h2>Weight</h2>
@@ -318,15 +373,22 @@ function viewHome() {
     </div>
 
     <h2>Workout · ${lifts}/${(data.week || []).length} this week${data.phase ? " · " + esc(data.phase) : ""}</h2>
-    ${w ? `<div class="card">
-        <div class="row"><div class="grow"><div class="big">${esc(w.title)}</div><div class="muted small">${esc(w.time)}${w.moved ? " · " + esc(w.moved) : ""}</div></div>
-        <span class="pill ${finished ? "done" : ""}">${esc(st)}</span></div>
-        <div style="margin-top:12px" class="row">
-          <button class="btn primary grow" data-open="${esc(w.path)}">${finished ? "View workout" : progressOf(w) ? "Continue workout" : "Start workout"}</button>
-        </div>
-        <button class="toggle ${finished ? "on" : ""}" style="margin-top:10px" data-finish="${esc(w.path)}">
-          <span>${finished ? `Logged as ${esc(st)} · edit` : "Workout done"}</span><span class="switch"></span></button>
-      </div>` : `<div class="card"><b>Rest day.</b>${next ? ` <span class="muted">Next: ${esc(next.label)} · ${esc(next.title)}</span> <a href="#" data-open="${esc(next.path)}">preview</a>` : ""}</div>`}
+    ${todays.length ? todays.map(todayCard).join("") : `<div class="card"><b>Rest day.</b>${next ? `
+      <div class="muted small" style="margin-top:4px">Next: ${esc(next.label)} · ${esc(next.title)} · <a href="#" data-open="${esc(next.path)}">preview</a></div>
+      <button class="btn ghost block" style="margin-top:10px" data-today="${esc(next.path)}">Do ${esc(next.title)} today instead</button>` : ""}</div>`}
+  </div>`;
+}
+function todayCard(w) {
+  const st = statusOf(w);
+  const finished = st !== "planned";
+  return `<div class="card">
+    <div class="row"><div class="grow"><div class="big">${esc(w.title)}</div><div class="muted small">${esc(w.time)}${w.moved ? " · " + esc(w.moved) : ""}</div></div>
+    <span class="pill ${finished ? "done" : ""}">${esc(st)}</span></div>
+    <div style="margin-top:12px" class="row">
+      <button class="btn primary grow" data-open="${esc(w.path)}">${finished ? "View workout" : progressOf(w) ? "Continue workout" : "Start workout"}</button>
+    </div>
+    <button class="toggle ${finished ? "on" : ""}" style="margin-top:10px" data-finish="${esc(w.path)}">
+      <span>${finished ? `Logged as ${esc(st)} · edit` : "Workout done"}</span><span class="switch"></span></button>
   </div>`;
 }
 function progressOf(w) { const s = LS.get(wk(w.path), null); return s ? Object.values(s.items).filter((x) => x.sym || x.alt).length : 0; }
@@ -387,6 +449,9 @@ function viewWorkout(path) {
   return `${header(`${w.title} · ${w.label}`, true)}
   <div class="wrap">
     <div class="small muted">${esc(w.phase)}${w.easy ? " · Easy week: weights are lighter" : ""}</div>
+    ${locked ? `<div class="card"><b>Planned for ${esc(w.label)}.</b> <span class="muted">Logging opens that day.</span>
+      <button class="btn primary block" style="margin-top:10px" data-today="${esc(w.path)}">Do it today instead</button>
+      <div class="small muted" style="margin-top:6px">Moves this workout to today in your plan, with the same weights. ${esc(w.label)} becomes free.</div></div>` : ""}
     <nav class="jump">${w.items.map((it) => `<a href="#ex-${it.n}" data-jump="${it.n}" class="${marked(it) ? "marked" : ""}">${it.n} ${esc(it.short.split(" ")[0])}</a>`).join("")}</nav>
     ${w.items.map((it) => exCard(w, it, s, locked)).join("")}
     <div class="card small muted">Then: ${esc(w.finisher || "stretches")}, 5 min. Short on time? Do 1–3 for 2 sets, mark the rest x, and finish as <b>short</b>. That counts.</div>
@@ -482,7 +547,7 @@ function render() {
   fillPhotos(app);
   renderSync();
   app.querySelectorAll("textarea").forEach(autogrow);
-  if (view.name === "home" && data) prefetch((data.workouts || []).find((x) => x.date === todayISO()));
+  if (view.name === "home" && data) allWorkouts().filter((x) => x.date === todayISO()).forEach(prefetch);
 }
 function autogrow(t) { t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight + 2, window.innerHeight * 0.3) + "px"; }
 
@@ -507,7 +572,7 @@ function rerenderCard(n) {
 }
 
 document.addEventListener("click", async (e) => {
-  const t = e.target.closest("[data-go],[data-act],[data-open],[data-finish],[data-mark],[data-step],[data-swaps],[data-swap],[data-unswap],[data-zoom],[data-jump]");
+  const t = e.target.closest("[data-go],[data-act],[data-open],[data-finish],[data-mark],[data-step],[data-swaps],[data-swap],[data-unswap],[data-zoom],[data-jump],[data-today]");
   if (!t) return;
   const ds = t.dataset;
   if (ds.go) { view = { name: ds.go }; render(); window.scrollTo(0, 0); return; }
@@ -537,6 +602,7 @@ document.addEventListener("click", async (e) => {
     rerenderCard(n); return;
   }
   if (ds.unswap) { const n = +ds.unswap; editItem(n, (st) => (st.alt = null)); rerenderCard(n); return; }
+  if (ds.today) { await doToday(ds.today, t); return; }
   if (ds.act === "refresh") { await refresh(true); return; }
   if (ds.act === "save-weight") return saveWeight();
   if (ds.act === "save-cfg") return saveCfg();
