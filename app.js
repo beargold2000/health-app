@@ -310,6 +310,7 @@ function viewHome() {
   const prev = avg7(series, new Date(new Date(t + "T12:00:00") - 7 * 864e5).toISOString().slice(0, 10));
   const todays = allWorkouts().filter((x) => x.date === t);
   const next = allWorkouts().find((x) => x.date > t);
+  const upcoming = allWorkouts().filter((x) => x.date > t).slice(todays.length ? 0 : 1, 6);
   const open = openWorkouts();
   const lateW = todays.find((x) => statusOf(x) === "planned");
   const late = lateW && hourET() >= 18;
@@ -339,6 +340,8 @@ function viewHome() {
     ${todays.length ? todays.map(todayCard).join("") : `<div class="card"><b>Rest day.</b>${next ? `
       <div class="muted small" style="margin-top:4px">Next: ${esc(next.label)} · ${esc(next.title)} · <a href="#" data-open="${esc(next.path)}">preview</a></div>
 ` : ""}</div>`}
+    ${upcoming.length ? `<h2>Coming up</h2><div class="card list">${upcoming.map((u) => `<a href="#" class="list-row" data-open="${esc(u.path)}">
+      <span class="grow"><b>${esc(u.label)}</b> · ${esc(u.title)}${u.moved ? `<br><span class="small muted">${esc(u.moved)}</span>` : ""}</span><span class="muted">›</span></a>`).join("")}</div>` : ""}
     <div class="small muted">Changing a lift day? Move it in Google Calendar; the app picks it up about a minute after you open it.</div>
   </div>`;
 }
