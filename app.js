@@ -573,7 +573,7 @@ function saveSessionNote(v) {
 function saveWeight() {
   const v = $("#wt").value.trim().replace(",", ".");
   const n = parseFloat(v);
-  if (!/^\d{2,3}(\.\d)?$/.test(v) || n < 80 || n > 400) { toast("Type your weight like 158.4"); return; }
+  if (!/^\d{2,3}(\.\d)?$/.test(v) || n < 80 || n > 400) { toast("Type your weight in pounds, one decimal at most"); return; }
   const q = LS.get("wq", {}); q[todayISO()] = String(n); LS.set("wq", q);
   $("#wt").blur();
   render();
