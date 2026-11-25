@@ -6,7 +6,7 @@
  * GitHub Actions runs once, when you finish. Your repo name and token live only in this phone's storage.
  */
 "use strict";
-const APP_VERSION = "Nov 25 · sync-button";
+const APP_VERSION = "Nov 25 · sync-detail";
 
 // ------------------------------------------------------------ storage
 const LS = {
@@ -53,7 +53,10 @@ async function gh(path, { method = "GET", body, raw = false } = {}) {
     },
     body: body ? JSON.stringify(body) : undefined,
   });
-  if (!r.ok) { const e = new Error(`GitHub ${r.status}`); e.status = r.status; throw e; }
+  if (!r.ok) {
+    let msg = ""; try { msg = (await r.json()).message || ""; } catch {}
+    const e = new Error(`GitHub ${r.status}${msg ? ": " + msg : ""}`); e.status = r.status; e.ghMessage = msg; throw e;
+  }
   return r;
 }
 const ref = () => `ref=${encodeURIComponent(cfg.branch || "main")}`;
@@ -263,9 +266,10 @@ async function askCalendarSync(force) {
     const why = e.status === 403 ? "GitHub said no (403): the key needs Actions: Read and write on the health repo"
       : e.status === 404 ? "GitHub said not found (404): check the repo name, or the key can't see Actions"
       : e.status === 401 ? "GitHub rejected the key (401)" : `couldn't reach GitHub (${e.status || "network"})`;
-    LS.set("syncResult", why);
+    const full = why + (e.ghMessage ? ` (GitHub: "${e.ghMessage}")` : "");
+    LS.set("syncResult", full);
     if (e.status === 403 || e.status === 404) LS.set("syncOffUntil", Date.now() + 24 * 3600 * 1000);
-    if (force) toast("Calendar sync: " + why, 6000);
+    if (force) toast("Calendar sync: " + full, 9000);
   }
   renderSync();
 }
