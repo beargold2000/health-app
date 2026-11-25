@@ -6,7 +6,7 @@
  * GitHub Actions runs once, when you finish. Your repo name and token live only in this phone's storage.
  */
 "use strict";
-const APP_VERSION = "Nov 25 · coming-up";
+const APP_VERSION = "Nov 25 · sync-button";
 
 // ------------------------------------------------------------ storage
 const LS = {
@@ -248,16 +248,26 @@ document.addEventListener("visibilitychange", () => {
 // workflow, which costs no Claude usage), at most every 10 minutes, then reloads the plan about a minute later.
 // Needs the key to have "Actions: Read and write"; without it this quietly does nothing and the daily 5:15 am
 // run still picks up calendar changes.
-async function askCalendarSync() {
-  if (!navigator.onLine || Date.now() - LS.get("syncAskedAt", 0) < 10 * 60 * 1000) return;
-  if (Date.now() < LS.get("syncOffUntil", 0)) return;
+async function askCalendarSync(force) {
+  if (!navigator.onLine) { if (force) toast("No signal: can't ask for a calendar sync right now."); return; }
+  const wait = force ? 60 * 1000 : 10 * 60 * 1000;                  // ↻ may ask once a minute; opening the app every 10
+  if (Date.now() - LS.get("syncAskedAt", 0) < wait) { if (force) toast("A calendar sync was asked for under a minute ago; check back shortly."); return; }
+  if (!force && Date.now() < LS.get("syncOffUntil", 0)) return;
   LS.set("syncAskedAt", Date.now());
   try {
     await gh("actions/workflows/update.yml/dispatches", { method: "POST", body: { ref: cfg.branch || "main" } });
-    [75, 150].forEach((sec) => setTimeout(() => refresh(false, true), sec * 1000));
+    LS.set("syncResult", "asked GitHub to re-read the calendar"); LS.del("syncOffUntil");
+    if (force) toast("Re-reading your calendar. Tap ↻ again in about a minute.", 4000);
+    [70, 140].forEach((sec) => setTimeout(() => refresh(false, true), sec * 1000));
   } catch (e) {
+    const why = e.status === 403 ? "GitHub said no (403): the key needs Actions: Read and write on the health repo"
+      : e.status === 404 ? "GitHub said not found (404): check the repo name, or the key can't see Actions"
+      : e.status === 401 ? "GitHub rejected the key (401)" : `couldn't reach GitHub (${e.status || "network"})`;
+    LS.set("syncResult", why);
     if (e.status === 403 || e.status === 404) LS.set("syncOffUntil", Date.now() + 24 * 3600 * 1000);
+    if (force) toast("Calendar sync: " + why, 6000);
   }
+  renderSync();
 }
 
 // ------------------------------------------------------------ views
@@ -449,6 +459,7 @@ function viewSettings() {
       </div>
       <p class="small muted">"Clear phone copy" drops unsynced changes and cached photos, then reloads from GitHub.</p>
       <p class="small muted">App version: ${esc(APP_VERSION)}</p>
+      <p class="small muted">Calendar sync: ${LS.get("syncAskedAt", 0) ? `last asked ${new Date(LS.get("syncAskedAt", 0)).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" })}: ${esc(LS.get("syncResult", "no answer yet"))}` : "not asked yet"}.</p>
     </div>
   </div>`;
 }
@@ -623,11 +634,10 @@ async function saveCfg() {
 
 async function refresh(loud, quiet) {
   if (!cfg.token) return render();
-  if (!quiet) askCalendarSync();
+  if (!quiet) await askCalendarSync(loud);
   try {
     if (navigator.onLine) await loadData();
     lastError = "";
-    if (loud) toast("Up to date");
   } catch (e) { if (loud) toast("Couldn't reach GitHub; showing the phone copy"); }
   // Don't redraw under the user's thumb while they're typing
   if (!document.activeElement || !["INPUT", "TEXTAREA"].includes(document.activeElement.tagName)) render();
